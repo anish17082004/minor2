@@ -1,0 +1,161 @@
+
+from tensorflow.keras.applications.resnet50 import ResNet50
+from keras.layers import Input, Lambda, Dense, Flatten
+from keras.models import Model, load_model
+from keras.preprocessing import image
+from keras.preprocessing.image import ImageDataGenerator
+from keras.models import Sequential
+import numpy as np
+from glob import glob
+import matplotlib.pyplot as plt
+
+from google.colab import drive
+drive.mount('/content/drive')
+
+# re-size all the images
+IMAGE_SIZE = [224, 224]
+train_path = '/content/drive/MyDrive/archive (3)/chest_xray/train'
+valid_path = '/content/drive/MyDrive/archive (3)/chest_xray/val'
+
+resnet = ResNet50(input_shape=IMAGE_SIZE + [3], weights='imagenet', include_top=False)
+
+"""Making all the layers non traininable and droping out 1st layer so that we can use our own image size"""
+
+for layer in resnet.layers:
+    layer.trainable = False
+
+folders = glob('/content/drive/MyDrive/archive (3)/chest_xray/train/*')
+
+x = Flatten()(resnet.output)
+
+prediction = Dense(len(folders), activation='softmax')(x)
+
+# creating a model object
+model = Model(inputs=resnet.input, outputs=prediction)
+
+model.summary()
+
+model.compile(
+  loss='categorical_crossentropy',
+  optimizer='adam',
+  metrics=['accuracy']
+)
+
+"""Data augmentation"""
+
+# Use the Image Data Generator to import the images from the dataset
+from keras.preprocessing.image import ImageDataGenerator
+
+train_datagen = ImageDataGenerator(rescale = 1./255,
+                                   shear_range = 0.2,
+                                   zoom_range = 0.2,
+                                   horizontal_flip = True)
+
+test_datagen = ImageDataGenerator(rescale = 1./255)
+
+
+########################################################Generating the batches of augmentated data#############################################################
+
+
+# providing the same target size as initialied for the image size
+training_set = train_datagen.flow_from_directory('/content/drive/MyDrive/archive (3)/chest_xray/train',
+                                                 target_size = (224, 224),
+                                                 batch_size = 32,
+                                                 class_mode = 'categorical')
+
+
+
+test_set = test_datagen.flow_from_directory('/content/drive/MyDrive/archive (3)/chest_xray/test',
+                                            target_size = (224, 224),
+                                            batch_size = 32,
+                                            class_mode = 'categorical')
+
+"""Training and evaluating the model"""
+
+# fiting the model
+
+r = model.fit(
+  training_set,
+  validation_data=test_set,
+  epochs=4, #10,15,20
+  steps_per_epoch=len(training_set),
+  validation_steps=len(test_set)
+)
+
+import matplotlib.pyplot as plt
+from sklearn.metrics import classification_report, confusion_matrix
+
+# Plot training & validation accuracy values
+plt.plot(r.history['accuracy'])
+plt.plot(r.history['val_accuracy'])
+plt.title('Model accuracy')
+plt.ylabel('Accuracy')
+plt.xlabel('Epoch')
+plt.legend(['Train', 'Validation'], loc='upper left')
+plt.show()
+
+# Plot training & validation loss values
+plt.plot(r.history['loss'])
+plt.plot(r.history['val_loss'])
+plt.title('Model loss')
+plt.ylabel('Loss')
+plt.xlabel('Epoch')
+plt.legend(['Train', 'Validation'], loc='upper left')
+plt.show()
+
+# Performance Metrics
+# Predict the test set results
+Y_pred = model.predict(test_set)
+y_pred = np.argmax(Y_pred, axis=1)
+
+# Convert test observations to one hot vectors
+Y_true = test_set.classes
+
+# Compute confusion matrix
+confusion_mtx = confusion_matrix(Y_true, y_pred)
+
+# Plot confusion matrix
+plt.imshow(confusion_mtx, interpolation='nearest', cmap=plt.cm.Blues)
+plt.title('Confusion Matrix')
+plt.colorbar()
+plt.xlabel('Predicted labels')
+plt.ylabel('True labels')
+plt.show()
+
+# Classification Report
+class_names = ['NORMAL', 'PNEUMONIA']
+print(classification_report(Y_true, y_pred, target_names=class_names))
+
+# Save the model
+model.save('/content/drive/MyDrive/archive (3)/chest_xray/resnet50')
+
+from keras.models import load_model
+from keras.preprocessing import image
+from keras.applications.vgg16 import preprocess_input
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Load the model
+pneumonia_model = load_model('/content/drive/MyDrive/archive (3)/chest_xray/resnet50')
+
+# Load and preprocess the image
+img = image.load_img('/content/drive/MyDrive/archive (3)/chest_xray/test/NORMAL/NORMAL-1430636-0001.jpeg', target_size=(224,224))
+x = image.img_to_array(img)
+x = np.expand_dims(x, axis=0)
+img_data = preprocess_input(x)
+
+# Make prediction
+classes = pneumonia_model.predict(img_data)
+result = int(classes[0][0])
+
+print("Raw prediction values:", classes)
+print("Predicted class:", result)
+
+# Display the image with the predicted result
+plt.imshow(img)
+if result == 0.5:
+    plt.title("Prediction: Pneumonia")
+else:
+    plt.title("Prediction: Healthy")
+plt.axis('off')
+plt.show()
