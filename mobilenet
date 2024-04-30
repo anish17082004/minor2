@@ -1,0 +1,346 @@
+!pip install vit_keras -q
+
+!pip install tensorflow-addons
+
+# Commented out IPython magic to ensure Python compatibility.
+import os
+import cv2
+import sys
+import random
+import warnings
+import numpy as np
+import pandas as pd
+from time import time
+from itertools import chain
+from tqdm.notebook import tqdm
+import matplotlib.pyplot as plt
+from skimage.transform import resize
+from skimage.morphology import label
+from skimage.io import imread, imshow, imread_collection, concatenate_images
+
+import tensorflow as tf
+from tensorflow.keras import backend as K
+from tensorflow.keras.regularizers import l2
+from tensorflow.keras.models import load_model, Model
+from tensorflow.keras.optimizers import RMSprop, Adam
+from tensorflow.keras.losses import binary_crossentropy
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
+from tensorflow.keras.layers import (
+    Dense, Input, Dropout, Lambda, Conv2D, Conv2DTranspose, MaxPooling2D, Concatenate,
+    Activation, Add, multiply, add, concatenate, LeakyReLU, ZeroPadding2D, UpSampling2D,
+    BatchNormalization, SeparableConv2D, Flatten )
+
+from sklearn.metrics import classification_report
+# %matplotlib inline
+
+from tensorflow.keras.applications import MobileNetV2
+
+from google.colab import drive
+drive.mount('/content/gdrive')
+
+PATH = "/content/gdrive/MyDrive/archive (3)/chest_xray"
+
+#reading required files
+train_dir = os.path.join(PATH, 'train')
+validation_dir = os.path.join(PATH, 'val')
+test_dir = os.path.join(PATH, 'test')
+
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+# Image dimensions expected by MobileNetV2
+IMG_HEIGHT = 224
+IMG_WIDTH = 224
+BATCH_SIZE = 32
+
+# Create ImageDataGenerators
+train_datagen = ImageDataGenerator(rescale=1./255)
+validation_datagen = ImageDataGenerator(rescale=1./255)
+test_datagen = ImageDataGenerator(rescale=1./255)
+
+# Flow training images in batches using tf.keras.preprocessing.image.ImageDataGenerator
+train_generator = train_datagen.flow_from_directory(
+    train_dir,
+    target_size=(IMG_HEIGHT, IMG_WIDTH),
+    batch_size=BATCH_SIZE,
+    class_mode='binary'  # or 'categorical' if you have more than two classes
+)
+
+# Flow validation images in batches using tf.keras.preprocessing.image.ImageDataGenerator
+validation_generator = validation_datagen.flow_from_directory(
+    validation_dir,
+    target_size=(IMG_HEIGHT, IMG_WIDTH),
+    batch_size=BATCH_SIZE,
+    class_mode='binary'
+)
+
+# Flow test images in batches using tf.keras.preprocessing.image.ImageDataGenerator
+test_generator = test_datagen.flow_from_directory(
+    test_dir,
+    target_size=(IMG_HEIGHT, IMG_WIDTH),
+    batch_size=BATCH_SIZE,
+    class_mode='binary'
+)
+
+!pip install keras-tuner
+
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.applications import VGG16
+from tensorflow.keras import layers, models
+from tensorflow.keras.metrics import Precision, Recall, AUC, BinaryAccuracy
+from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping, CSVLogger, Callback
+from tensorflow.keras import backend as K
+from keras_tuner import RandomSearch
+
+# Define metrics
+precision_metric = Precision()
+recall_metric = Recall()
+auc_metric = AUC()
+auc_pr_metric = AUC(curve='PR')
+
+def F1Score(y_true, y_pred):
+    precision = precision_metric(y_true, y_pred)
+    recall = recall_metric(y_true, y_pred)
+    f1_score = 2 * ((precision * recall) / (precision + recall + tf.keras.backend.epsilon()))
+    return f1_score
+
+# Callbacks Setup
+checkpoint = ModelCheckpoint('model-best-new-data.h5', save_best_only=True, monitor='val_accuracy', mode='max')
+early_stopping = EarlyStopping(monitor='val_loss', patience=10)
+csv_logger = CSVLogger('training_log-new-data.csv')
+
+class ResetStatesCallback(Callback):
+    def on_epoch_begin(self, epoch, logs=None):
+        precision_metric.reset_states()
+        recall_metric.reset_states()
+        auc_metric.reset_states()
+        auc_pr_metric.reset_states()
+
+# Include the ResetStatesCallback in your callbacks list
+reset_states_callback = ResetStatesCallback()
+
+# Model Setup with MobileNetV2
+def build_model(hp):
+    base_model = MobileNetV2(input_shape=(224, 224, 3), include_top=False, weights='imagenet')
+    base_model.trainable = False
+
+    model = tf.keras.Sequential([
+        base_model,
+        layers.GlobalAveragePooling2D(),
+        layers.Dense(units=hp.Int('units', min_value=32, max_value=512, step=32), activation='relu'),
+        layers.Dropout(rate=hp.Float('dropout', min_value=0.0, max_value=0.5, step=0.1)),
+        layers.Dense(1, activation='sigmoid')
+    ])
+
+    model.compile(
+        optimizer=Adam(learning_rate=hp.Float('learning_rate', min_value=1e-4, max_value=1e-2, sampling='LOG')),
+        loss='binary_crossentropy',
+        metrics=[
+            'accuracy',
+            precision_metric,
+            recall_metric,
+            F1Score,
+            auc_metric,
+            auc_pr_metric
+        ]
+    )
+
+    return model
+
+from tensorflow.keras.applications import MobileNetV2
+
+# Define the tuner
+tuner = RandomSearch(
+    build_model,
+    objective='val_accuracy',
+    max_trials=3,
+    executions_per_trial=1,
+    directory='my_dir',
+    project_name='pneumonia_detection-new-data'
+)
+
+# Run the hyperparameter search
+tuner.search(train_generator, epochs=2, validation_data=validation_generator, callbacks=[checkpoint, early_stopping, csv_logger, reset_states_callback])
+
+# Get the best hyperparameters
+best_hparams = tuner.oracle.get_best_trials(num_trials=1)[0].hyperparameters.values
+print("Best Hyperparameters:")
+print(best_hparams)
+
+# Get the best hyperparameters
+best_trial = tuner.oracle.get_best_trials(num_trials=1)[0]
+best_hparams = best_trial.hyperparameters.values
+print("Best Hyperparameters:")
+print(best_hparams)
+
+# Build the final model using the best hyperparameters
+final_model = tuner.hypermodel.build(best_trial.hyperparameters)
+final_model.compile(optimizer=tf.keras.optimizers.Adam(), loss='binary_crossentropy', metrics=['accuracy'])
+
+# Build the final model using the best hyperparameters
+final_model_test = tuner.hypermodel.build(best_trial.hyperparameters)
+final_model_test.compile(optimizer=tf.keras.optimizers.Adam(), loss='binary_crossentropy', metrics=['accuracy', precision_metric,
+            recall_metric,
+            F1Score,
+            auc_metric,
+            auc_pr_metric])
+
+# Train the final model
+final_history_test = final_model_test.fit(
+    train_generator,
+    epochs=8,  # Adjust as needed
+    validation_data=validation_generator,
+    verbose=1
+)
+
+# Evaluate the model on the test data
+test_loss_full, test_accuracy_full, test_precision_full, test_recall_full, test_f1score_full, test_auc_full, test_auc_pr_full = final_model_test.evaluate(test_generator)
+
+print(f"Test Loss: {test_loss_full}")
+print(f"Test Accuracy: {test_accuracy_full}")
+print(f"Test Precision: {test_precision_full}")
+print(f"Test Recall: {test_recall_full}")
+print(f"Test F1 Score: {test_f1score_full}")
+print(f"Test AUC: {test_auc_full}")
+print(f"Test AUC-PR: {test_auc_pr_full}")
+
+import matplotlib.pyplot as plt
+
+# Assuming you have the 'history' object from model.fit()
+epochs = range(1, len(final_history_test.history['loss']) + 1)
+
+plt.figure(figsize=(18, 10))
+
+# Plotting Training and Validation Loss
+plt.subplot(2, 2, 1)
+plt.plot(epochs, final_history_test.history['loss'], label='Training Loss')
+plt.plot(epochs, final_history_test.history['val_loss'], label='Validation Loss')
+plt.title('Training and Validation Loss')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.xticks(epochs)
+plt.legend()
+
+# Plotting Training and Validation Accuracy
+plt.subplot(2, 2, 2)
+plt.plot(epochs, final_history_test.history['accuracy'], label='Training Accuracy')
+plt.plot(epochs, final_history_test.history['val_accuracy'], label='Validation Accuracy')
+plt.title('Training and Validation Accuracy')
+plt.xlabel('Epoch')
+plt.ylabel('Accuracy')
+plt.xticks(epochs)
+plt.legend()
+
+# Plotting Training and Validation Precision
+plt.subplot(2, 2, 3)
+plt.plot(epochs, final_history_test.history['precision'], label='Training Precision')
+plt.plot(epochs, final_history_test.history['val_precision'], label='Validation Precision')
+plt.title('Training and Validation Precision')
+plt.xlabel('Epoch')
+plt.ylabel('Precision')
+plt.xticks(epochs)
+plt.legend()
+
+# Plotting Training and Validation Recall
+plt.subplot(2, 2, 4)
+plt.plot(epochs, final_history_test.history['recall'], label='Training Recall')
+plt.plot(epochs, final_history_test.history['val_recall'], label='Validation Recall')
+plt.title('Training and Validation Recall')
+plt.xlabel('Epoch')
+plt.ylabel('Recall')
+plt.xticks(epochs)
+plt.legend()
+
+# Add similar sections for other metrics like F1 Score, AUC, etc., replacing 'METRIC_NAME' with actual metric names
+
+plt.tight_layout()
+plt.show()
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+# Assuming you have the 'history' object from model.fit()
+epochs = range(1, len(final_history_test.history['loss']) + 1)
+
+plt.figure(figsize=(18, 10))
+
+# Plotting Training and Validation Loss
+plt.subplot(2, 2, 1)
+plt.plot(epochs, final_history_test.history['loss'], label='Training Loss')
+plt.plot(epochs, final_history_test.history['val_loss'], label='Validation Loss')
+plt.title('Training and Validation Loss')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.xticks(np.arange(1, len(epochs)+1, 5))  # Set ticks at every 5 epochs
+plt.ylim(0, 1)  # Set y-axis limit to start at 0
+plt.legend()
+
+# Plotting Training and Validation Accuracy
+plt.subplot(2, 2, 2)
+plt.plot(epochs, final_history_test.history['accuracy'], label='Training Accuracy')
+plt.plot(epochs, final_history_test.history['val_accuracy'], label='Validation Accuracy')
+plt.title('Training and Validation Accuracy')
+plt.xlabel('Epoch')
+plt.ylabel('Accuracy')
+plt.xticks(np.arange(1, len(epochs)+1, 5))  # Set ticks at every 5 epochs
+plt.ylim(0, 1.2)  # Set y-axis limit to start at 0
+plt.legend()
+
+# Plotting Training and Validation Precision
+plt.subplot(2, 2, 3)
+plt.plot(epochs, final_history_test.history['precision'], label='Training Precision')
+plt.plot(epochs, final_history_test.history['val_precision'], label='Validation Precision')
+plt.title('Training and Validation Precision')
+plt.xlabel('Epoch')
+plt.ylabel('Precision')
+plt.xticks(np.arange(1, len(epochs)+1, 5))  # Set ticks at every 5 epochs
+plt.ylim(0, 1.2)  # Set y-axis limit to start at 0
+plt.legend()
+
+# Plotting Training and Validation Recall
+plt.subplot(2, 2, 4)
+plt.plot(epochs, final_history_test.history['recall'], label='Training Recall')
+plt.plot(epochs, final_history_test.history['val_recall'], label='Validation Recall')
+plt.title('Training and Validation Recall')
+plt.xlabel('Epoch')
+plt.ylabel('Recall')
+plt.xticks(np.arange(1, len(epochs)+1, 5))  # Set ticks at every 5 epochs
+plt.ylim(0, 1.2)  # Set y-axis limit to start at 0
+plt.legend()
+
+# Add similar sections for other metrics like F1 Score, AUC, etc., replacing 'METRIC_NAME' with actual metric names
+
+plt.tight_layout()
+plt.show()
+
+# Save the model
+final_model_test.save('/content/gdrive/MyDrive/archive (3)/chest_xray/mobilenet')
+
+from tensorflow.keras.models import load_model
+from tensorflow.keras.preprocessing import image
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Load the saved model
+saved_model = load_model('/content/gdrive/MyDrive/archive (3)/chest_xray/mobilenet')
+
+# Function to make prediction from image path and display the image
+def predict_and_show_pneumonia(image_path):
+    img = image.load_img(image_path, target_size=(IMG_HEIGHT, IMG_WIDTH))
+    img_array = image.img_to_array(img)
+    img_array = np.expand_dims(img_array, axis=0)
+    img_array = img_array / 255.0  # Normalize the image
+
+    prediction = saved_model.predict(img_array)
+    if prediction[0] > 0.5:
+        result = "Pneumonia"
+    else:
+        result = "Normal"
+
+    # Display the image with the predicted result
+    plt.imshow(img)
+    plt.title(f"Prediction: {result}")
+    plt.axis('off')
+    plt.show()
+
+# Example usage
+image_path = "/content/gdrive/MyDrive/archive (3)/chest_xray/test/PNEUMONIA/BACTERIA-1135262-0004.jpeg"  # Replace with the path to your image
+predict_and_show_pneumonia(image_path)
